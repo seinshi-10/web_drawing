@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>AirDraw — Draw with your finger</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0a0c12;
+    --glass:rgba(255,255,255,0.06);
+    --glass-border:rgba(255,255,255,0.10);
+    --glass-strong:rgba(20,22,30,0.55);
+    --text:#f2f3f5;
+    --text-dim:#9aa0ac;
+    --coral:#ff4d6d;
+    --cyan:#38bdf8;
+    --white:#f5f5f7;
+    --mint:#4ade80;
+    --danger:#ff5d5d;
+    --radius-lg:26px;
+    --radius-md:18px;
+    --radius-sm:12px;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{
+    margin:0; padding:0; width:100%; height:100%; overflow:hidden;
+    background:var(--bg); color:var(--text);
+    font-family:'Inter',system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  #stage{position:fixed; inset:0; overflow:hidden;}
+  video, #drawCanvas, #cursorCanvas{
+    position:absolute; top:50%; left:50%;
+    transform:translate(-50%,-50%) scaleX(-1);
+    max-width:none;
+  }
+  video{ filter:brightness(0.55) saturate(1.05); }
+  #vignette{
+    position:absolute; inset:0; pointer-events:none;
+    background:radial-gradient(ellipse at 50% 40%, rgba(10,12,18,0) 40%, rgba(6,7,11,0.85) 100%);
+  }
+
+  /* ---- Top bar ---- */
+  .topbar{
+    position:fixed; top:20px; left:20px; right:20px;
+    display:flex; align-items:center; justify-content:space-between;
+    z-index:20; pointer-events:none;
+  }
+  .brand{
+    display:flex; align-items:center; gap:10px;
+    background:var(--glass-strong); border:1px solid var(--glass-border);
+    backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px);
+    padding:10px 18px 10px 14px; border-radius:999px;
+    pointer-events:auto;
+  }
+  .brand-dot{width:10px;height:10px;border-radius:50%;
+    background:conic-gradient(var(--coral),var(--cyan),var(--mint),var(--coral));
+    box-shadow:0 0 12px rgba(255,255,255,0.35);
+  }
+  .brand-name{font-family:'Space Grotesk',sans-serif; font-weight:600; font-size:15px; letter-spacing:0.2px;}
+  .brand-sub{font-size:11px; color:var(--text-dim); margin-left:4px;}
+
+  .top-actions{display:flex; gap:10px; pointer-events:auto;}
+  .pill-btn{
+    display:flex; align-items:center; gap:7px;
+    background:var(--glass-strong); border:1px solid var(--glass-border);
+    backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px);
+    color:var(--text); font-family:'Inter',sans-serif; font-weight:600; font-size:13px;
+    padding:10px 16px; border-radius:999px; cursor:pointer;
+    transition:transform .15s ease, background .15s ease, border-color .15s ease;
+  }
+  .pill-btn:hover{transform:translateY(-1px); background:rgba(255,255,255,0.1); border-color:rgba(255,255,255,0.2);}
+  .pill-btn:active{transform:translateY(0px) scale(0.97);}
+  .pill-btn.accent{background:linear-gradient(135deg,var(--cyan),#2b8fd6); border-color:transparent; color:#04121c;}
+
+  /* ---- Status pill (gesture indicator) ---- */
+  .status{
+    position:fixed; top:20px; left:50%; transform:translateX(-50%);
+    z-index:20; pointer-events:none;
+    background:var(--glass-strong); border:1px solid var(--glass-border);
+    backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px);
+    padding:8px 16px; border-radius:999px;
+    font-size:12px; font-weight:600; letter-spacing:0.3px; color:var(--text-dim);
+    display:flex; align-items:center; gap:8px;
+    opacity:0; transition:opacity .3s ease;
+  }
+  .status.show{opacity:1;}
+  .status .led{width:7px;height:7px;border-radius:50%; background:var(--text-dim); transition:background .15s ease, box-shadow .15s ease;}
+  .status.drawing .led{background:var(--coral); box-shadow:0 0 8px var(--coral);}
+  .status.idle .led{background:var(--mint); box-shadow:0 0 8px var(--mint);}
+  .status.select .led{background:var(--cyan); box-shadow:0 0 8px var(--cyan);}
+
+  /* ---- Left dock (iPad-style floating toolbar) ---- */
+  .dock{
+    position:fixed; left:20px; top:50%; transform:translateY(-50%);
+    z-index:20; display:flex; flex-direction:column; align-items:center; gap:14px;
+    background:var(--glass-strong); border:1px solid var(--glass-border);
+    backdrop-filter:blur(24px); -webkit-backdrop-filter:blur(24px);
+    padding:16px 12px; border-radius:999px;
+    box-shadow:0 10px 40px rgba(0,0,0,0.35);
+  }
+  .swatch{
+    width:34px; height:34px; border-radius:50%; cursor:pointer;
+    border:2px solid rgba(255,255,255,0.25);
+    transition:transform .15s ease, border-color .15s ease, box-shadow .15s ease;
+    position:relative;
+  }
+  .swatch:hover{transform:scale(1.08);}
+  .swatch.active{border-color:#fff; transform:scale(1.14); box-shadow:0 0 0 3px rgba(255,255,255,0.12);}
+  .swatch[data-color="coral"]{background:var(--coral);}
+  .swatch[data-color="cyan"]{background:var(--cyan);}
+  .swatch[data-color="white"]{background:var(--white);}
+  .swatch[data-color="mint"]{background:var(--mint);}
+  .dock-divider{width:22px; height:1px; background:var(--glass-border);}
+  .dock-btn{
+    width:34px; height:34px; border-radius:50%;
+    display:flex; align-items:center; justify-content:center;
+    background:rgba(255,255,255,0.06); border:1px solid var(--glass-border);
+    cursor:pointer; color:var(--text); font-size:15px;
+    transition:background .15s ease, transform .15s ease;
+  }
+  .dock-btn:hover{background:rgba(255,255,255,0.14); transform:scale(1.06);}
+  .dock-btn.danger:hover{background:rgba(255,93,93,0.25); border-color:rgba(255,93,93,0.5);}
+  .brush-size{
+    display:flex; flex-direction:column; align-items:center; gap:6px;
+  }
+  .brush-size input[type=range]{
+    writing-mode:vertical-lr; direction:rtl;
+    width:20px; height:70px; accent-color:var(--cyan);
+    background:transparent; cursor:pointer;
+  }
+  .brush-label{font-size:9px; color:var(--text-dim); letter-spacing:0.5px;}
+
+  /* ---- Hint card ---- */
+  .hint{
+    position:fixed; right:20px; bottom:20px; z-index:20;
+    background:var(--glass-strong); border:1px solid var(--glass-border);
+    backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px);
+    border-radius:var(--radius-md); padding:14px 16px; max-width:250px;
+    font-size:12.5px; line-height:1.6; color:var(--text-dim);
+    transition:opacity .4s ease;
+  }
+  .hint b{color:var(--text); font-weight:600;}
+  .hint .close-hint{
+    position:absolute; top:8px; right:10px; cursor:pointer; color:var(--text-dim);
+    font-size:14px; background:none; border:none;
+  }
+
+  /* ---- Permission / loading overlay ---- */
+  #overlay{
+    position:fixed; inset:0; z-index:50; display:flex; align-items:center; justify-content:center;
+    background:radial-gradient(ellipse at center, #11141c 0%, #05060a 100%);
+    flex-direction:column; gap:18px; text-align:center; padding:24px;
+  }
+  #overlay.hidden{display:none;}
+  .spinner{
+    width:38px; height:38px; border-radius:50%;
+    border:3px solid rgba(255,255,255,0.12); border-top-color:var(--cyan);
+    animation:spin 0.9s linear infinite;
+  }
+  @keyframes spin{to{transform:rotate(360deg);}}
+  #overlay h1{font-family:'Space Grotesk',sans-serif; font-size:22px; margin:0; font-weight:600;}
+  #overlay p{color:var(--text-dim); font-size:13.5px; max-width:320px; margin:0; line-height:1.6;}
+  #overlay button{
+    margin-top:6px; background:linear-gradient(135deg,var(--cyan),#2b8fd6); border:none; color:#04121c;
+    font-weight:700; font-size:14px; padding:12px 26px; border-radius:999px; cursor:pointer;
+    font-family:'Inter',sans-serif;
+  }
+  #err{color:var(--coral); font-size:12.5px; max-width:320px;}
+
+  /* ---- Modals ---- */
+  .modal-backdrop{
+    position:fixed; inset:0; z-index:60; background:rgba(4,5,8,0.7);
+    backdrop-filter:blur(6px); display:flex; align-items:center; justify-content:center;
+    opacity:0; pointer-events:none; transition:opacity .2s ease; padding:24px;
+  }
+  .modal-backdrop.show{opacity:1; pointer-events:auto;}
+  .modal{
+    background:#12141c; border:1px solid var(--glass-border); border-radius:var(--radius-lg);
+    padding:24px; width:100%; max-width:420px; max-height:80vh; overflow:auto;
+    box-shadow:0 30px 80px rgba(0,0,0,0.5);
+  }
+  .modal h2{font-family:'Space Grotesk',sans-serif; margin:0 0 4px; font-size:19px;}
+  .modal p.sub{color:var(--text-dim); font-size:13px; margin:0 0 18px;}
+  .modal input[type=text]{
+    width:100%; background:rgba(255,255,255,0.05); border:1px solid var(--glass-border);
+    color:var(--text); padding:12px 14px; border-radius:var(--radius-sm); font-size:14px;
+    font-family:'Inter',sans-serif; outline:none;
+  }
+  .modal input[type=text]:focus{border-color:var(--cyan);}
+  .modal-row{display:flex; gap:10px; margin-top:18px;}
+  .modal-row .pill-btn{flex:1; justify-content:center;}
+  #savePreview{width:100%; border-radius:var(--radius-md); margin-bottom:14px; border:1px solid var(--glass-border); display:block;}
+
+  .gallery-grid{display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:4px;}
+  .gallery-item{
+    border-radius:var(--radius-sm); overflow:hidden; border:1px solid var(--glass-border);
+    background:rgba(255,255,255,0.03); cursor:pointer; position:relative;
+    aspect-ratio:1/1;
+  }
+  .gallery-item img{width:100%; height:100%; object-fit:cover; display:block;}
+  .gallery-item .g-name{
+    position:absolute; bottom:0; left:0; right:0; padding:6px 8px 5px;
+    font-size:10.5px; background:linear-gradient(transparent,rgba(0,0,0,0.75));
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  .gallery-empty{color:var(--text-dim); font-size:13px; text-align:center; padding:30px 10px;}
+  .gallery-loading{color:var(--text-dim); font-size:13px; text-align:center; padding:30px 10px;}
+
+  @media (max-width:640px){
+    .dock{left:12px; padding:12px 9px; gap:11px;}
+    .swatch{width:29px; height:29px;}
+    .dock-btn{width:29px; height:29px; font-size:13px;}
+    .hint{display:none;}
+    .brand-sub{display:none;}
+    .top-actions .pill-btn span.label{display:none;}
+    .topbar{left:12px; right:12px; top:14px;}
+  }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="drawCanvas"></canvas>
+  <canvas id="cursorCanvas"></canvas>
+  <div id="vignette"></div>
+</div>
+
+<div class="topbar">
+  <div class="brand">
+    <div class="brand-dot"></div>
+    <div class="brand-name">AirDraw</div>
+    <div class="brand-sub">finger-tracked canvas</div>
+  </div>
+  <div class="top-actions">
+    <button class="pill-btn" id="galleryBtn">🖼️ <span class="label">Gallery</span></button>
+    <button class="pill-btn accent" id="saveBtn">💾 <span class="label">Save</span></button>
+  </div>
+</div>
+
+<div class="status" id="status"><span class="led"></span><span id="statusText">Idle</span></div>
+
+<div class="dock">
+  <div class="swatch active" data-color="coral" style="--sw:var(--coral)"></div>
+  <div class="swatch" data-color="cyan"></div>
+  <div class="swatch" data-color="white"></div>
+  <div class="swatch" data-color="mint"></div>
+  <div class="dock-divider"></div>
+  <div class="brush-size">
+    <input type="range" id="brushSize" min="3" max="18" value="7">
+  </div>
+  <div class="dock-divider"></div>
+  <div class="dock-btn danger" id="clearBtn" title="Clear canvas">✕</div>
+</div>
+
+<div class="hint" id="hint">
+  <button class="close-hint" id="closeHint">✕</button>
+  <b>How to draw</b><br>
+  Point with your index finger — the trail follows your fingertip.<br><br>
+  <b>Pinch</b> thumb + index together to lift the pen and move without drawing.
+</div>
+
+<div id="overlay">
+  <div id="preSpinner" style="display:none" class="spinner"></div>
+  <h1 id="overlayTitle">Turn on your camera</h1>
+  <p id="overlayText">AirDraw tracks your hand through your webcam so you can draw in the air with your fingertip. Nothing is recorded or uploaded — tracking runs entirely in your browser.</p>
+  <div id="err"></div>
+  <button id="startBtn">Enable camera</button>
+</div>
+
+<!-- Save modal -->
+<div class="modal-backdrop" id="saveModal">
+  <div class="modal">
+    <h2>Save drawing</h2>
+    <p class="sub">Give it a name — it'll be added to the public gallery.</p>
+    <img id="savePreview" alt="preview">
+    <input type="text" id="drawingName" placeholder="Untitled drawing" maxlength="40">
+    <div class="modal-row">
+      <button class="pill-btn" id="cancelSave">Cancel</button>
+      <button class="pill-btn accent" id="confirmSave">Publish</button>
+    </div>
+  </div>
+</div>
+
+<!-- Gallery modal -->
+<div class="modal-backdrop" id="galleryModal">
+  <div class="modal" style="max-width:520px;">
+    <h2>Gallery</h2>
+    <p class="sub">Drawings published by everyone using AirDraw.</p>
+    <div id="galleryContent" class="gallery-loading">Loading…</div>
+    <div class="modal-row">
+      <button class="pill-btn" id="closeGallery" style="width:100%">Close</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script>
+// ---------------------------------------------------------------------------
+// CONFIG — point this at your deployed Cloudflare Worker
+// ---------------------------------------------------------------------------
+const WORKER_URL = "https://square-leaf-2f58.tazabaevmaman07.workers.dev/";
+
+// ---------------------------------------------------------------------------
+// Setup
+// ---------------------------------------------------------------------------
+const video = document.getElementById('video');
+const drawCanvas = document.getElementById('drawCanvas');
+const cursorCanvas = document.getElementById('cursorCanvas');
+const dctx = drawCanvas.getContext('2d');
+const cctx = cursorCanvas.getContext('2d');
+
+const COLORS = { coral:'#ff4d6d', cyan:'#38bdf8', white:'#f5f5f7', mint:'#4ade80' };
+let currentColor = COLORS.coral;
+let brushSize = 7;
+let lastPoint = null;
+let smoothed = null;
+const SMOOTH = 0.45; // pointer smoothing factor
+
+function sizeCanvases(){
+  const w = video.videoWidth || window.innerWidth;
+  const h = video.videoHeight || window.innerHeight;
+  [video, drawCanvas, cursorCanvas].forEach(el=>{
+    el.width = w; el.height = h;
+  });
+  // scale to fill viewport while covering (like object-fit: cover)
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const scale = Math.max(vw / w, vh / h);
+  const cw = w * scale, ch = h * scale;
+  [video, drawCanvas, cursorCanvas].forEach(el=>{
+    el.style.width = cw + 'px';
+    el.style.height = ch + 'px';
+  });
+}
+window.addEventListener('resize', sizeCanvases);
+
+// swatches
+document.querySelectorAll('.swatch').forEach(sw=>{
+  sw.addEventListener('click', ()=>{
+    document.querySelectorAll('.swatch').forEach(s=>s.classList.remove('active'));
+    sw.classList.add('active');
+    currentColor = COLORS[sw.dataset.color];
+  });
+});
+document.getElementById('brushSize').addEventListener('input', e=>{
+  brushSize = parseInt(e.target.value,10);
+});
+document.getElementById('clearBtn').addEventListener('click', ()=>{
+  dctx.clearRect(0,0,drawCanvas.width,drawCanvas.height);
+});
+document.getElementById('closeHint').addEventListener('click', ()=>{
+  document.getElementById('hint').style.opacity = '0';
+  setTimeout(()=>document.getElementById('hint').remove(), 400);
+});
+
+// status pill
+const statusEl = document.getElementById('status');
+const statusText = document.getElementById('statusText');
+function setStatus(mode){
+  statusEl.classList.add('show');
+  statusEl.classList.remove('drawing','idle','select');
+  if(mode === 'draw'){ statusEl.classList.add('drawing'); statusText.textContent = 'Drawing'; }
+  else if(mode === 'select'){ statusEl.classList.add('select'); statusText.textContent = 'Pen up'; }
+  else { statusEl.classList.add('idle'); statusText.textContent = 'Hand visible'; }
+}
+let statusHideTimer = null;
+function pingLost(){
+  statusText.textContent = 'No hand detected';
+  statusEl.classList.remove('drawing','idle','select');
+  clearTimeout(statusHideTimer);
+  statusHideTimer = setTimeout(()=> statusEl.classList.remove('show'), 1800);
+}
+
+// ---------------------------------------------------------------------------
+// Gesture logic
+// ---------------------------------------------------------------------------
+function dist(a,b){ return Math.hypot(a.x-b.x, a.y-b.y); }
+
+function fingerExtended(lm, tip, pip, mcp){
+  // extended if tip is further from the MCP than the pip is (roughly straight)
+  return dist(lm[tip], lm[mcp]) > dist(lm[pip], lm[mcp]) * 1.15;
+}
+
+function classify(lm){
+  const indexExt  = fingerExtended(lm, 8, 6, 5);
+  const middleExt = fingerExtended(lm, 12, 10, 9);
+  const ringExt   = fingerExtended(lm, 16, 14, 13);
+  const pinkyExt  = fingerExtended(lm, 20, 18, 17);
+  const pinchDist = dist(lm[4], lm[8]);
+  const handSpan  = dist(lm[0], lm[9]) || 0.001;
+  const pinching  = (pinchDist / handSpan) < 0.35;
+
+  if (pinching) return 'select';
+  if (indexExt && !middleExt && !ringExt && !pinkyExt) return 'draw';
+  return 'idle';
+}
+
+// ---------------------------------------------------------------------------
+// MediaPipe Hands
+// ---------------------------------------------------------------------------
+const hands = new Hands({
+  locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+});
+hands.setOptions({
+  maxNumHands: 1,
+  modelComplexity: 1,
+  minDetectionConfidence: 0.65,
+  minTrackingConfidence: 0.6
+});
+
+hands.onResults((results)=>{
+  cctx.clearRect(0,0,cursorCanvas.width,cursorCanvas.height);
+
+  if(!results.multiHandLandmarks || results.multiHandLandmarks.length === 0){
+    lastPoint = null; smoothed = null;
+    pingLost();
+    return;
+  }
+
+  const lm = results.multiHandLandmarks[0];
+  const mode = classify(lm);
+  const tip = lm[8];
+  const px = tip.x * drawCanvas.width;
+  const py = tip.y * drawCanvas.height;
+
+  if(!smoothed) smoothed = {x:px, y:py};
+  smoothed.x += (px - smoothed.x) * SMOOTH;
+  smoothed.y += (py - smoothed.y) * SMOOTH;
+
+  setStatus(mode);
+
+  // cursor dot
+  cctx.save();
+  cctx.beginPath();
+  cctx.arc(smoothed.x, smoothed.y, brushSize*0.9, 0, Math.PI*2);
+  cctx.fillStyle = mode === 'draw' ? currentColor : 'rgba(255,255,255,0.55)';
+  cctx.shadowColor = mode === 'draw' ? currentColor : 'transparent';
+  cctx.shadowBlur = mode === 'draw' ? 18 : 0;
+  cctx.fill();
+  cctx.restore();
+
+  if(mode === 'draw'){
+    dctx.lineJoin = 'round';
+    dctx.lineCap = 'round';
+    dctx.strokeStyle = currentColor;
+    dctx.lineWidth = brushSize;
+    dctx.shadowColor = currentColor;
+    dctx.shadowBlur = 10;
+    if(lastPoint){
+      dctx.beginPath();
+      dctx.moveTo(lastPoint.x, lastPoint.y);
+      dctx.lineTo(smoothed.x, smoothed.y);
+      dctx.stroke();
+    }
+    lastPoint = {x:smoothed.x, y:smoothed.y};
+  } else {
+    lastPoint = null;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Camera bootstrap
+// ---------------------------------------------------------------------------
+let camera = null;
+async function startCamera(){
+  const overlay = document.getElementById('overlay');
+  const startBtn = document.getElementById('startBtn');
+  const spinner = document.getElementById('preSpinner');
+  const errEl = document.getElementById('err');
+  startBtn.style.display = 'none';
+  spinner.style.display = 'block';
+  document.getElementById('overlayTitle').textContent = 'Starting camera…';
+  errEl.textContent = '';
+
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({ video:{ width:1280, height:720, facingMode:'user' }, audio:false });
+    video.srcObject = stream;
+    await new Promise(res => { video.onloadedmetadata = res; });
+    video.play();
+    sizeCanvases();
+
+    camera = new Camera(video, {
+      onFrame: async () => { await hands.send({image: video}); },
+      width: video.videoWidth || 1280,
+      height: video.videoHeight || 720
+    });
+    camera.start();
+    overlay.classList.add('hidden');
+  }catch(err){
+    spinner.style.display = 'none';
+    startBtn.style.display = 'inline-block';
+    document.getElementById('overlayTitle').textContent = 'Camera access needed';
+    errEl.textContent = 'Could not access your camera (' + err.message + '). Check permissions and try again.';
+  }
+}
+document.getElementById('startBtn').addEventListener('click', startCamera);
+
+// ---------------------------------------------------------------------------
+// Save flow
+// ---------------------------------------------------------------------------
+const saveModal = document.getElementById('saveModal');
+document.getElementById('saveBtn').addEventListener('click', ()=>{
+  const merged = document.createElement('canvas');
+  merged.width = drawCanvas.width;
+  merged.height = drawCanvas.height;
+  const mctx = merged.getContext('2d');
+  mctx.fillStyle = '#0a0c12';
+  mctx.fillRect(0,0,merged.width,merged.height);
+  mctx.drawImage(drawCanvas,0,0);
+  const dataUrl = merged.toDataURL('image/png');
+  document.getElementById('savePreview').src = dataUrl;
+  saveModal.dataset.image = dataUrl;
+  saveModal.classList.add('show');
+});
+document.getElementById('cancelSave').addEventListener('click', ()=> saveModal.classList.remove('show'));
+
+document.getElementById('confirmSave').addEventListener('click', async ()=>{
+  const btn = document.getElementById('confirmSave');
+  const name = document.getElementById('drawingName').value.trim() || 'Untitled drawing';
+  const image = saveModal.dataset.image;
+  btn.textContent = 'Publishing…';
+  btn.disabled = true;
+  try{
+    const res = await fetch(`${WORKER_URL}/api/save`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ name, image })
+    });
+    if(!res.ok) throw new Error('Request failed');
+    saveModal.classList.remove('show');
+    document.getElementById('drawingName').value = '';
+  }catch(e){
+    alert("Couldn't publish — check that WORKER_URL is set correctly in index.html.");
+  }finally{
+    btn.textContent = 'Publish';
+    btn.disabled = false;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Gallery flow
+// ---------------------------------------------------------------------------
+const galleryModal = document.getElementById('galleryModal');
+const galleryContent = document.getElementById('galleryContent');
+document.getElementById('galleryBtn').addEventListener('click', async ()=>{
+  galleryModal.classList.add('show');
+  galleryContent.innerHTML = '<div class="gallery-loading">Loading…</div>';
+  try{
+    const res = await fetch(`${WORKER_URL}/api/gallery`);
+    if(!res.ok) throw new Error('bad response');
+    const data = await res.json();
+    if(!data.items || data.items.length === 0){
+      galleryContent.innerHTML = '<div class="gallery-empty">No drawings published yet — be the first!</div>';
+      return;
+    }
+    galleryContent.innerHTML = '';
+    const grid = document.createElement('div');
+    grid.className = 'gallery-grid';
+    data.items.forEach(item=>{
+      const div = document.createElement('div');
+      div.className = 'gallery-item';
+      div.innerHTML = `<img src="${item.image}" alt="${item.name}"><div class="g-name">${item.name}</div>`;
+      grid.appendChild(div);
+    });
+    galleryContent.appendChild(grid);
+  }catch(e){
+    galleryContent.innerHTML = '<div class="gallery-empty">Could not load the gallery — check that WORKER_URL is set correctly in index.html.</div>';
+  }
+});
+document.getElementById('closeGallery').addEventListener('click', ()=> galleryModal.classList.remove('show'));
+[saveModal, galleryModal].forEach(m=>{
+  m.addEventListener('click', (e)=>{ if(e.target === m) m.classList.remove('show'); });
+});
+</script>
+</body>
+</html>
