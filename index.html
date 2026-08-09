@@ -259,8 +259,8 @@
 <div class="hint" id="hint">
   <button class="close-hint" id="closeHint">✕</button>
   <b>How to draw</b><br>
-  Point with your index finger — the trail follows your fingertip.<br><br>
-  <b>Pinch</b> thumb + index together to lift the pen and move without drawing.
+  Make a fist and point with <b>only your index finger</b> — that's the draw gesture.<br><br>
+  Open your hand (or pinch thumb + index) to lift the pen without drawing.
 </div>
 
 <div id="overlay">
@@ -318,8 +318,41 @@ const COLORS = { coral:'#ff4d6d', cyan:'#38bdf8', white:'#f5f5f7', mint:'#4ade80
 let currentColor = COLORS.coral;
 let brushSize = 7;
 let lastPoint = null;
+
+// ---------------------------------------------------------------------------
+// One Euro Filter — adaptive smoothing: heavy filtering when the finger is
+// nearly still (kills jitter/wobble on strokes), almost none when it's
+// moving fast (kills lag on quick motion). This is what gives the "drawn
+// with a mouse" precision instead of a shaky webcam line.
+// ---------------------------------------------------------------------------
+class OneEuroFilter {
+  constructor(minCutoff = 1.2, beta = 0.4, dCutoff = 1.0){
+    this.minCutoff = minCutoff; this.beta = beta; this.dCutoff = dCutoff;
+    this.xPrev = null; this.dxPrev = 0; this.tPrev = null;
+  }
+  alpha(cutoff, dt){
+    const tau = 1.0/(2*Math.PI*cutoff);
+    return 1.0/(1.0+tau/dt);
+  }
+  filter(x, t){
+    if(this.tPrev === null){ this.tPrev = t; this.xPrev = x; return x; }
+    const dt = Math.max((t - this.tPrev)/1000, 1/120);
+    this.tPrev = t;
+    const dx = (x - this.xPrev)/dt;
+    const aD = this.alpha(this.dCutoff, dt);
+    const dxHat = this.dxPrev + aD*(dx - this.dxPrev);
+    this.dxPrev = dxHat;
+    const cutoff = this.minCutoff + this.beta*Math.abs(dxHat);
+    const a = this.alpha(cutoff, dt);
+    const xHat = this.xPrev + a*(x - this.xPrev);
+    this.xPrev = xHat;
+    return xHat;
+  }
+  reset(){ this.xPrev = null; this.dxPrev = 0; this.tPrev = null; }
+}
+const filterX = new OneEuroFilter(1.3, 0.6, 1.0);
+const filterY = new OneEuroFilter(1.3, 0.6, 1.0);
 let smoothed = null;
-const SMOOTH = 0.45; // pointer smoothing factor
 
 function sizeCanvases(){
   const w = video.videoWidth || window.innerWidth;
@@ -376,27 +409,83 @@ function pingLost(){
 }
 
 // ---------------------------------------------------------------------------
-// Gesture logic
+// Gesture logic — exactly like the reference: index finger alone extended
+// (a fist with just the pointer up) = DRAWING. Anything else (open hand,
+// fist, other fingers up) = OBSERVING (pen up). Pinch = brief pause/select.
+//
+// Precision comes from measuring the actual joint angle at each knuckle
+// rather than a rough distance ratio — a finger is "extended" only if it's
+// nearly straight (MCP→PIP→TIP close to 180°), which holds true regardless
+// of hand rotation or distance from the camera.
 // ---------------------------------------------------------------------------
-function dist(a,b){ return Math.hypot(a.x-b.x, a.y-b.y); }
+function dist(a,b){ return Math.hypot(a.x-b.x, a.y-b.y, (a.z||0)-(b.z||0)); }
 
-function fingerExtended(lm, tip, pip, mcp){
-  // extended if tip is further from the MCP than the pip is (roughly straight)
-  return dist(lm[tip], lm[mcp]) > dist(lm[pip], lm[mcp]) * 1.15;
+function jointAngleDeg(a, b, c){
+  // angle at vertex b, formed by points a and c
+  const v1 = {x:a.x-b.x, y:a.y-b.y, z:(a.z||0)-(b.z||0)};
+  const v2 = {x:c.x-b.x, y:c.y-b.y, z:(c.z||0)-(b.z||0)};
+  const mag1 = Math.hypot(v1.x,v1.y,v1.z), mag2 = Math.hypot(v2.x,v2.y,v2.z);
+  if(mag1 < 1e-6 || mag2 < 1e-6) return 180;
+  const cos = (v1.x*v2.x + v1.y*v2.y + v1.z*v2.z) / (mag1*mag2);
+  return Math.acos(Math.min(1, Math.max(-1, cos))) * 180/Math.PI;
 }
 
-function classify(lm){
-  const indexExt  = fingerExtended(lm, 8, 6, 5);
-  const middleExt = fingerExtended(lm, 12, 10, 9);
-  const ringExt   = fingerExtended(lm, 16, 14, 13);
-  const pinkyExt  = fingerExtended(lm, 20, 18, 17);
+// finger joint indices: [MCP, PIP, DIP, TIP]
+const FINGER_JOINTS = {
+  thumb:  [1, 2, 3, 4],
+  index:  [5, 6, 7, 8],
+  middle: [9, 10, 11, 12],
+  ring:   [13, 14, 15, 16],
+  pinky:  [17, 18, 19, 20],
+};
+
+function fingerStraightness(lm, name){
+  const [mcp, pip, dip, tip] = FINGER_JOINTS[name];
+  // average the two knuckle angles for a stable 0(curled)-180(straight) reading
+  const a1 = jointAngleDeg(lm[mcp], lm[pip], lm[dip]);
+  const a2 = jointAngleDeg(lm[pip], lm[dip], lm[tip]);
+  return (a1 + a2) / 2;
+}
+
+const EXTEND_THRESHOLD = 152; // degrees — nearly straight
+const CURL_THRESHOLD   = 140; // degrees — must be clearly bent to count as curled
+
+function classifyRaw(lm){
+  const sIndex  = fingerStraightness(lm, 'index');
+  const sMiddle = fingerStraightness(lm, 'middle');
+  const sRing   = fingerStraightness(lm, 'ring');
+  const sPinky  = fingerStraightness(lm, 'pinky');
+
+  const indexExt  = sIndex  > EXTEND_THRESHOLD;
+  const middleCurl = sMiddle < CURL_THRESHOLD;
+  const ringCurl   = sRing   < CURL_THRESHOLD;
+  const pinkyCurl  = sPinky  < CURL_THRESHOLD;
+
   const pinchDist = dist(lm[4], lm[8]);
   const handSpan  = dist(lm[0], lm[9]) || 0.001;
-  const pinching  = (pinchDist / handSpan) < 0.35;
+  const pinching  = (pinchDist / handSpan) < 0.32;
 
   if (pinching) return 'select';
-  if (indexExt && !middleExt && !ringExt && !pinkyExt) return 'draw';
+  if (indexExt && middleCurl && ringCurl && pinkyCurl) return 'draw';
   return 'idle';
+}
+
+// ---- Debounce: require the same raw gesture for a few consecutive frames
+// before committing to it. Kills single-frame misreads without adding
+// noticeable input lag (~2 frames ≈ 30-60ms at webcam frame rates).
+const DEBOUNCE_FRAMES = 3;
+let pendingMode = null, pendingCount = 0, committedMode = 'idle';
+function debounce(rawMode){
+  if(rawMode === pendingMode){
+    pendingCount++;
+  } else {
+    pendingMode = rawMode;
+    pendingCount = 1;
+  }
+  if(pendingCount >= DEBOUNCE_FRAMES){
+    committedMode = rawMode;
+  }
+  return committedMode;
 }
 
 // ---------------------------------------------------------------------------
@@ -412,24 +501,35 @@ hands.setOptions({
   minTrackingConfidence: 0.6
 });
 
+let framesSinceHand = 0;
 hands.onResults((results)=>{
   cctx.clearRect(0,0,cursorCanvas.width,cursorCanvas.height);
 
   if(!results.multiHandLandmarks || results.multiHandLandmarks.length === 0){
-    lastPoint = null; smoothed = null;
+    framesSinceHand++;
+    // give tracking a couple frames of grace before dropping the stroke —
+    // avoids a broken line on a single dropped detection
+    if(framesSinceHand > 2){
+      lastPoint = null; smoothed = null;
+      filterX.reset(); filterY.reset();
+      pendingMode = null; pendingCount = 0; committedMode = 'idle';
+    }
     pingLost();
     return;
   }
+  framesSinceHand = 0;
 
   const lm = results.multiHandLandmarks[0];
-  const mode = classify(lm);
+  const rawMode = classifyRaw(lm);
+  const mode = debounce(rawMode);
+
   const tip = lm[8];
+  const now = performance.now();
   const px = tip.x * drawCanvas.width;
   const py = tip.y * drawCanvas.height;
-
-  if(!smoothed) smoothed = {x:px, y:py};
-  smoothed.x += (px - smoothed.x) * SMOOTH;
-  smoothed.y += (py - smoothed.y) * SMOOTH;
+  const fx = filterX.filter(px, now);
+  const fy = filterY.filter(py, now);
+  smoothed = {x:fx, y:fy};
 
   setStatus(mode);
 
@@ -441,6 +541,13 @@ hands.onResults((results)=>{
   cctx.shadowColor = mode === 'draw' ? currentColor : 'transparent';
   cctx.shadowBlur = mode === 'draw' ? 18 : 0;
   cctx.fill();
+  if(mode !== 'draw'){
+    cctx.beginPath();
+    cctx.arc(smoothed.x, smoothed.y, brushSize*0.9+5, 0, Math.PI*2);
+    cctx.strokeStyle = 'rgba(255,255,255,0.35)';
+    cctx.lineWidth = 1.5;
+    cctx.stroke();
+  }
   cctx.restore();
 
   if(mode === 'draw'){
