@@ -31,15 +31,27 @@
     -webkit-font-smoothing:antialiased;
   }
   #stage{position:fixed; inset:0; overflow:hidden;}
+  #board{
+    position:absolute; inset:0;
+    background:
+      radial-gradient(ellipse at 50% 32%, #182420 0%, #0d1613 45%, #070b09 78%, #050706 100%);
+  }
+  #board::after{
+    content:''; position:absolute; inset:0; opacity:0.05; pointer-events:none;
+    background-image:
+      repeating-linear-gradient(45deg, #ffffff 0px, transparent 1px, transparent 4px),
+      repeating-linear-gradient(-45deg, #ffffff 0px, transparent 1px, transparent 4px);
+    mix-blend-mode:overlay;
+  }
   video, #drawCanvas, #cursorCanvas{
     position:absolute; top:50%; left:50%;
     transform:translate(-50%,-50%) scaleX(-1);
     max-width:none;
   }
-  video{ filter:brightness(0.55) saturate(1.05); }
+  video{ opacity:0; pointer-events:none; }
   #vignette{
     position:absolute; inset:0; pointer-events:none;
-    background:radial-gradient(ellipse at 50% 40%, rgba(10,12,18,0) 40%, rgba(6,7,11,0.85) 100%);
+    background:radial-gradient(ellipse at 50% 40%, rgba(10,12,18,0) 40%, rgba(4,5,6,0.85) 100%);
   }
 
   /* ---- Top bar ---- */
@@ -133,6 +145,24 @@
   }
   .brush-label{font-size:9px; color:var(--text-dim); letter-spacing:0.5px;}
 
+  /* ---- Delete zone (drag a shape here to remove it) ---- */
+  .delete-zone{
+    position:fixed; bottom:24px; left:50%; transform:translateX(-50%);
+    z-index:20; display:flex; align-items:center; gap:9px;
+    background:var(--glass-strong); border:1px solid var(--glass-border);
+    backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px);
+    padding:12px 20px; border-radius:999px;
+    font-size:13px; font-weight:600; color:var(--text-dim);
+    transition:all .18s ease;
+  }
+  .delete-zone .trash-icon{font-size:16px; transition:transform .18s ease;}
+  .delete-zone.active{
+    background:rgba(255,93,93,0.22); border-color:rgba(255,93,93,0.6); color:#ffd7d7;
+    transform:translateX(-50%) scale(1.08);
+    box-shadow:0 0 30px rgba(255,93,93,0.35);
+  }
+  .delete-zone.active .trash-icon{transform:scale(1.2) rotate(-8deg);}
+
   /* ---- Hint card ---- */
   .hint{
     position:fixed; right:20px; bottom:20px; z-index:20;
@@ -223,6 +253,7 @@
 <body>
 
 <div id="stage">
+  <div id="board"></div>
   <video id="video" autoplay playsinline muted></video>
   <canvas id="drawCanvas"></canvas>
   <canvas id="cursorCanvas"></canvas>
@@ -242,6 +273,8 @@
 </div>
 
 <div class="status" id="status"><span class="led"></span><span id="statusText">Idle</span></div>
+
+<div class="delete-zone" id="deleteZone"><span class="trash-icon">🗑️</span> Drag here to delete</div>
 
 <div class="dock">
   <div class="swatch active" data-color="coral" style="--sw:var(--coral)"></div>
@@ -266,7 +299,7 @@
 <div id="overlay">
   <div id="preSpinner" style="display:none" class="spinner"></div>
   <h1 id="overlayTitle">Turn on your camera</h1>
-  <p id="overlayText">AirDraw tracks your hand through your webcam so you can draw in the air with your fingertip. Nothing is recorded or uploaded — tracking runs entirely in your browser.</p>
+  <p id="overlayText">AirDraw tracks your hand through your webcam so you can draw in the air with your fingertip. Your camera feed is never shown on screen or uploaded — only the hand skeleton is drawn, over a plain board.</p>
   <div id="err"></div>
   <button id="startBtn">Enable camera</button>
 </div>
@@ -303,7 +336,7 @@
 // ---------------------------------------------------------------------------
 // CONFIG — point this at your deployed Cloudflare Worker
 // ---------------------------------------------------------------------------
-const WORKER_URL = "https://square-leaf-2f58.tazabaevmaman07.workers.dev/";
+const WORKER_URL = "https://airdraw-worker.YOUR_SUBDOMAIN.workers.dev";
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -582,7 +615,27 @@ function findNearestStroke(p){
   return best;
 }
 
-function renderStrokes(highlightStroke){
+// Map a point in canvas pixel space to real screen coordinates, accounting
+// for the "cover" scaling and the horizontal mirror applied to the canvas.
+const deleteZone = document.getElementById('deleteZone');
+function canvasPtToScreen(px, py){
+  const scale = Math.max(window.innerWidth / drawCanvas.width, window.innerHeight / drawCanvas.height);
+  const cw = drawCanvas.width * scale, ch = drawCanvas.height * scale;
+  const centerX = window.innerWidth / 2, centerY = window.innerHeight / 2;
+  const fx = px / drawCanvas.width, fy = py / drawCanvas.height;
+  return {
+    x: centerX + cw/2 - fx*cw,   // mirrored horizontally
+    y: centerY - ch/2 + fy*ch
+  };
+}
+function isOverDeleteZone(px, py){
+  const s = canvasPtToScreen(px, py);
+  const r = deleteZone.getBoundingClientRect();
+  const pad = 14;
+  return s.x >= r.left-pad && s.x <= r.right+pad && s.y >= r.top-pad && s.y <= r.bottom+pad;
+}
+
+function renderStrokes(highlightStroke, overDelete){
   dctx.clearRect(0,0,drawCanvas.width,drawCanvas.height);
   const all = currentStroke ? [...strokes, currentStroke] : strokes;
   all.forEach(s=>{
@@ -593,10 +646,12 @@ function renderStrokes(highlightStroke){
     dctx.lineWidth = s.width;
     dctx.shadowColor = s.color;
     dctx.shadowBlur = 10;
+    dctx.globalAlpha = (highlightStroke === s && overDelete) ? 0.4 : 1;
     dctx.beginPath();
     dctx.moveTo(s.points[0].x, s.points[0].y);
     for(let i=1;i<s.points.length;i++) dctx.lineTo(s.points[i].x, s.points[i].y);
     dctx.stroke();
+    dctx.globalAlpha = 1;
   });
   if(highlightStroke && highlightStroke.points.length){
     const xs = highlightStroke.points.map(p=>p.x), ys = highlightStroke.points.map(p=>p.y);
@@ -606,7 +661,7 @@ function renderStrokes(highlightStroke){
     dctx.save();
     dctx.setLineDash([7,6]);
     dctx.lineWidth = 2;
-    dctx.strokeStyle = 'rgba(255,255,255,0.8)';
+    dctx.strokeStyle = overDelete ? 'rgba(255,93,93,0.9)' : 'rgba(255,255,255,0.8)';
     dctx.shadowBlur = 0;
     dctx.strokeRect(x0,y0,x1-x0,y1-y0);
     dctx.restore();
@@ -627,10 +682,14 @@ hands.onResults((results)=>{
       filterX.reset(); filterY.reset();
       pendingMode = null; pendingCount = 0; committedMode = 'idle'; prevMode = 'idle';
       if(currentStroke){ strokes.push(currentStroke); currentStroke = null; }
+      if(grabbed && grabbed.overDelete){
+        strokes = strokes.filter(s => s.id !== grabbed.stroke.id);
+      }
+      deleteZone.classList.remove('active');
       grabbed = null;
     }
     pingLost();
-    renderStrokes(grabbed && grabbed.stroke);
+    renderStrokes(grabbed && grabbed.stroke, grabbed && grabbed.overDelete);
     return;
   }
   framesSinceHand = 0;
@@ -673,15 +732,25 @@ hands.onResults((results)=>{
     if(!grabbed && prevMode !== 'select'){
       const target = findNearestStroke(pinchPt);
       if(target){
-        grabbed = { stroke: target, origPoints: target.points.map(p=>({...p})), startPinch: {...pinchPt} };
+        grabbed = { stroke: target, origPoints: target.points.map(p=>({...p})), startPinch: {...pinchPt}, overDelete:false };
       }
     }
     if(grabbed){
       const dx = pinchPt.x - grabbed.startPinch.x;
       const dy = pinchPt.y - grabbed.startPinch.y;
       grabbed.stroke.points = grabbed.origPoints.map(p=>({x:p.x+dx, y:p.y+dy}));
+
+      const over = isOverDeleteZone(pinchPt.x, pinchPt.y);
+      grabbed.overDelete = over;
+      deleteZone.classList.toggle('active', over);
     }
   } else {
+    if(grabbed){
+      if(grabbed.overDelete){
+        strokes = strokes.filter(s => s.id !== grabbed.stroke.id);
+      }
+      deleteZone.classList.remove('active');
+    }
     grabbed = null;
   }
 
@@ -697,7 +766,7 @@ hands.onResults((results)=>{
   cctx.fill();
   cctx.restore();
 
-  renderStrokes(grabbed && grabbed.stroke);
+  renderStrokes(grabbed && grabbed.stroke, grabbed && grabbed.overDelete);
 });
 
 // ---------------------------------------------------------------------------
@@ -746,7 +815,7 @@ document.getElementById('saveBtn').addEventListener('click', ()=>{
   merged.width = drawCanvas.width;
   merged.height = drawCanvas.height;
   const mctx = merged.getContext('2d');
-  mctx.fillStyle = '#0a0c12';
+  mctx.fillStyle = '#0d1613';
   mctx.fillRect(0,0,merged.width,merged.height);
   mctx.drawImage(drawCanvas,0,0);
   const dataUrl = merged.toDataURL('image/png');
