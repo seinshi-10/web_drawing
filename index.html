@@ -258,9 +258,9 @@
 
 <div class="hint" id="hint">
   <button class="close-hint" id="closeHint">✕</button>
-  <b>How to draw</b><br>
-  Make a fist and point with <b>only your index finger</b> — that's the draw gesture.<br><br>
-  Open your hand (or pinch thumb + index) to lift the pen without drawing.
+  <b>Point</b> — index finger out, others curled — to draw.<br><br>
+  <b>Open hand</b> to lift the pen, no drawing.<br><br>
+  <b>Pinch</b> thumb + index near a shape, then move your hand to drag it.
 </div>
 
 <div id="overlay">
@@ -383,6 +383,9 @@ document.getElementById('brushSize').addEventListener('input', e=>{
   brushSize = parseInt(e.target.value,10);
 });
 document.getElementById('clearBtn').addEventListener('click', ()=>{
+  strokes = [];
+  currentStroke = null;
+  grabbed = null;
   dctx.clearRect(0,0,drawCanvas.width,drawCanvas.height);
 });
 document.getElementById('closeHint').addEventListener('click', ()=>{
@@ -393,11 +396,11 @@ document.getElementById('closeHint').addEventListener('click', ()=>{
 // status pill
 const statusEl = document.getElementById('status');
 const statusText = document.getElementById('statusText');
-function setStatus(mode){
+function setStatus(mode, hasGrabbed){
   statusEl.classList.add('show');
   statusEl.classList.remove('drawing','idle','select');
   if(mode === 'draw'){ statusEl.classList.add('drawing'); statusText.textContent = 'Drawing'; }
-  else if(mode === 'select'){ statusEl.classList.add('select'); statusText.textContent = 'Pen up'; }
+  else if(mode === 'select'){ statusEl.classList.add('select'); statusText.textContent = hasGrabbed ? 'Moving object' : 'Pinch to grab'; }
   else { statusEl.classList.add('idle'); statusText.textContent = 'Hand visible'; }
 }
 let statusHideTimer = null;
@@ -501,7 +504,118 @@ hands.setOptions({
   minTrackingConfidence: 0.6
 });
 
+// ---------------------------------------------------------------------------
+// 2D hand skeleton — mirrors your actual hand pose every frame, same as the
+// reference video (cyan wireframe that opens, points, and closes with you).
+// ---------------------------------------------------------------------------
+const HAND_CONNECTIONS = [
+  [0,1],[1,2],[2,3],[3,4],          // thumb
+  [0,5],[5,6],[6,7],[7,8],          // index
+  [5,9],[9,10],[10,11],[11,12],     // middle
+  [9,13],[13,14],[14,15],[15,16],   // ring
+  [13,17],[17,18],[18,19],[19,20],  // pinky
+  [0,17]                            // palm base
+];
+
+function drawSkeleton(lm, mode){
+  const pts = lm.map(p => ({x:p.x*cursorCanvas.width, y:p.y*cursorCanvas.height}));
+  const glow = mode === 'draw' ? currentColor : (mode === 'select' ? COLORS.cyan : 'rgba(120,220,255,0.9)');
+
+  cctx.save();
+  cctx.lineWidth = 2.5;
+  cctx.strokeStyle = glow;
+  cctx.shadowColor = glow;
+  cctx.shadowBlur = 8;
+  cctx.lineCap = 'round';
+  HAND_CONNECTIONS.forEach(([a,b])=>{
+    cctx.beginPath();
+    cctx.moveTo(pts[a].x, pts[a].y);
+    cctx.lineTo(pts[b].x, pts[b].y);
+    cctx.stroke();
+  });
+  cctx.shadowBlur = 4;
+  cctx.fillStyle = glow;
+  pts.forEach((p,i)=>{
+    cctx.beginPath();
+    cctx.arc(p.x, p.y, i===8 ? 5 : 3, 0, Math.PI*2);
+    cctx.fill();
+  });
+  cctx.restore();
+}
+
+// ---------------------------------------------------------------------------
+// Strokes as movable objects — every completed stroke is kept as its own
+// vector path (points + color + width) and the canvas is fully re-rendered
+// from that list each frame, so a stroke can be grabbed and dragged later.
+// ---------------------------------------------------------------------------
+let strokes = [];        // { id, color, width, points:[{x,y}] }
+let currentStroke = null;
+let grabbed = null;      // { stroke, origPoints, startPinch:{x,y} }
+const GRAB_RADIUS = 55;  // canvas px — how close the pinch must be to an object to grab it
+
+const pinchFilterX = new OneEuroFilter(1.0, 0.5, 1.0);
+const pinchFilterY = new OneEuroFilter(1.0, 0.5, 1.0);
+
+function pointToSegDist(p, a, b){
+  const dx = b.x-a.x, dy = b.y-a.y;
+  const lenSq = dx*dx+dy*dy;
+  let t = lenSq === 0 ? 0 : ((p.x-a.x)*dx + (p.y-a.y)*dy) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  const cx = a.x + t*dx, cy = a.y + t*dy;
+  return Math.hypot(p.x-cx, p.y-cy);
+}
+function distToStroke(p, stroke){
+  const pts = stroke.points;
+  if(pts.length === 1) return Math.hypot(p.x-pts[0].x, p.y-pts[0].y);
+  let min = Infinity;
+  for(let i=0;i<pts.length-1;i++){
+    min = Math.min(min, pointToSegDist(p, pts[i], pts[i+1]));
+  }
+  return min;
+}
+function findNearestStroke(p){
+  let best = null, bestDist = GRAB_RADIUS;
+  for(const s of strokes){
+    const d = distToStroke(p, s);
+    if(d < bestDist){ bestDist = d; best = s; }
+  }
+  return best;
+}
+
+function renderStrokes(highlightStroke){
+  dctx.clearRect(0,0,drawCanvas.width,drawCanvas.height);
+  const all = currentStroke ? [...strokes, currentStroke] : strokes;
+  all.forEach(s=>{
+    if(s.points.length < 2) return;
+    dctx.lineJoin = 'round';
+    dctx.lineCap = 'round';
+    dctx.strokeStyle = s.color;
+    dctx.lineWidth = s.width;
+    dctx.shadowColor = s.color;
+    dctx.shadowBlur = 10;
+    dctx.beginPath();
+    dctx.moveTo(s.points[0].x, s.points[0].y);
+    for(let i=1;i<s.points.length;i++) dctx.lineTo(s.points[i].x, s.points[i].y);
+    dctx.stroke();
+  });
+  if(highlightStroke && highlightStroke.points.length){
+    const xs = highlightStroke.points.map(p=>p.x), ys = highlightStroke.points.map(p=>p.y);
+    const pad = 16;
+    const x0 = Math.min(...xs)-pad, y0 = Math.min(...ys)-pad;
+    const x1 = Math.max(...xs)+pad, y1 = Math.max(...ys)+pad;
+    dctx.save();
+    dctx.setLineDash([7,6]);
+    dctx.lineWidth = 2;
+    dctx.strokeStyle = 'rgba(255,255,255,0.8)';
+    dctx.shadowBlur = 0;
+    dctx.strokeRect(x0,y0,x1-x0,y1-y0);
+    dctx.restore();
+  }
+}
+
 let framesSinceHand = 0;
+let prevMode = 'idle';
+
 hands.onResults((results)=>{
   cctx.clearRect(0,0,cursorCanvas.width,cursorCanvas.height);
 
@@ -510,11 +624,13 @@ hands.onResults((results)=>{
     // give tracking a couple frames of grace before dropping the stroke —
     // avoids a broken line on a single dropped detection
     if(framesSinceHand > 2){
-      lastPoint = null; smoothed = null;
       filterX.reset(); filterY.reset();
-      pendingMode = null; pendingCount = 0; committedMode = 'idle';
+      pendingMode = null; pendingCount = 0; committedMode = 'idle'; prevMode = 'idle';
+      if(currentStroke){ strokes.push(currentStroke); currentStroke = null; }
+      grabbed = null;
     }
     pingLost();
+    renderStrokes(grabbed && grabbed.stroke);
     return;
   }
   framesSinceHand = 0;
@@ -522,51 +638,66 @@ hands.onResults((results)=>{
   const lm = results.multiHandLandmarks[0];
   const rawMode = classifyRaw(lm);
   const mode = debounce(rawMode);
-
-  const tip = lm[8];
   const now = performance.now();
-  const px = tip.x * drawCanvas.width;
-  const py = tip.y * drawCanvas.height;
-  const fx = filterX.filter(px, now);
-  const fy = filterY.filter(py, now);
-  smoothed = {x:fx, y:fy};
 
-  setStatus(mode);
+  drawSkeleton(lm, mode);
+  setStatus(mode, !!grabbed);
 
-  // cursor dot
+  // ---- smoothed index fingertip (used for drawing) ----
+  const tip = lm[8];
+  const tipPx = {x: tip.x*drawCanvas.width, y: tip.y*drawCanvas.height};
+  const fx = filterX.filter(tipPx.x, now);
+  const fy = filterY.filter(tipPx.y, now);
+  const smoothedTip = {x:fx, y:fy};
+
+  // ---- smoothed pinch point (used for grabbing/moving) ----
+  const rawPinch = {
+    x: (lm[4].x+lm[8].x)/2*drawCanvas.width,
+    y: (lm[4].y+lm[8].y)/2*drawCanvas.height
+  };
+  const pinchPt = { x: pinchFilterX.filter(rawPinch.x, now), y: pinchFilterY.filter(rawPinch.y, now) };
+
+  // ---- DRAW mode: accumulate a stroke ----
+  if(mode === 'draw'){
+    if(!currentStroke){
+      currentStroke = { id: crypto.randomUUID(), color: currentColor, width: brushSize, points: [smoothedTip] };
+    }
+    currentStroke.points.push(smoothedTip);
+  } else if(currentStroke){
+    strokes.push(currentStroke);
+    currentStroke = null;
+  }
+
+  // ---- SELECT (pinch) mode: grab & drag the nearest stroke ----
+  if(mode === 'select'){
+    if(!grabbed && prevMode !== 'select'){
+      const target = findNearestStroke(pinchPt);
+      if(target){
+        grabbed = { stroke: target, origPoints: target.points.map(p=>({...p})), startPinch: {...pinchPt} };
+      }
+    }
+    if(grabbed){
+      const dx = pinchPt.x - grabbed.startPinch.x;
+      const dy = pinchPt.y - grabbed.startPinch.y;
+      grabbed.stroke.points = grabbed.origPoints.map(p=>({x:p.x+dx, y:p.y+dy}));
+    }
+  } else {
+    grabbed = null;
+  }
+
+  prevMode = mode;
+
+  // cursor dot for the drawing fingertip
   cctx.save();
   cctx.beginPath();
-  cctx.arc(smoothed.x, smoothed.y, brushSize*0.9, 0, Math.PI*2);
-  cctx.fillStyle = mode === 'draw' ? currentColor : 'rgba(255,255,255,0.55)';
+  cctx.arc(smoothedTip.x, smoothedTip.y, brushSize*0.9, 0, Math.PI*2);
+  cctx.fillStyle = mode === 'draw' ? currentColor : 'rgba(255,255,255,0.5)';
   cctx.shadowColor = mode === 'draw' ? currentColor : 'transparent';
   cctx.shadowBlur = mode === 'draw' ? 18 : 0;
   cctx.fill();
-  if(mode !== 'draw'){
-    cctx.beginPath();
-    cctx.arc(smoothed.x, smoothed.y, brushSize*0.9+5, 0, Math.PI*2);
-    cctx.strokeStyle = 'rgba(255,255,255,0.35)';
-    cctx.lineWidth = 1.5;
-    cctx.stroke();
-  }
   cctx.restore();
 
-  if(mode === 'draw'){
-    dctx.lineJoin = 'round';
-    dctx.lineCap = 'round';
-    dctx.strokeStyle = currentColor;
-    dctx.lineWidth = brushSize;
-    dctx.shadowColor = currentColor;
-    dctx.shadowBlur = 10;
-    if(lastPoint){
-      dctx.beginPath();
-      dctx.moveTo(lastPoint.x, lastPoint.y);
-      dctx.lineTo(smoothed.x, smoothed.y);
-      dctx.stroke();
-    }
-    lastPoint = {x:smoothed.x, y:smoothed.y};
-  } else {
-    lastPoint = null;
-  }
+  renderStrokes(grabbed && grabbed.stroke);
 });
 
 // ---------------------------------------------------------------------------
